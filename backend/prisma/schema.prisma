@@ -15,6 +15,7 @@ model User {
 	email String  @unique
 	provider AuthProvider
   name String
+  supabaseId String
   conversations Conversation[]
 } 
 
