@@ -222,7 +222,7 @@ export default function Dashboard() {
 
         setIsStreaming(true);
         const isFollowUp = !!activeConversationId;
-        const endpoint = isFollowUp ? `${BACKEND_URL}/ask-with-followup` : `${BACKEND_URL}/ask`;
+        const endpoint = isFollowUp ? `${BACKEND_URL}/ask-with-followup-rest` : `${BACKEND_URL}/ask-rest`;
 
         setMessages((prev) => [...prev, { role: "User", content: queryText }]);
         setMessages((prev) => [...prev, { role: "Assistant", content: "" }]);
