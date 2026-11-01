@@ -95,8 +95,20 @@ def extract_json(text):
     return json.loads(cleaned[start : end + 1])
 
 
-def call_model(system_prompt, user_prompt):
-    res = requests.post(
+# Free "reasoning" models count their thinking tokens against max_tokens. If
+# the budget runs out mid-thought the API returns finish_reason="length" with
+# empty content. So: ask for low reasoning effort first, then retry with a
+# bigger budget and reasoning switched off, then with a bigger budget and no
+# hints at all (some models ignore or reject the reasoning parameter).
+ATTEMPTS = [
+    {"max_tokens": 8000, "reasoning": {"effort": "low"}},
+    {"max_tokens": 16000, "reasoning": {"enabled": False}},
+    {"max_tokens": 16000},
+]
+
+
+def _post_to_model(system_prompt, user_prompt, extra):
+    return requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -112,16 +124,37 @@ def call_model(system_prompt, user_prompt):
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.2,
-            "max_tokens": 4000,
+            **extra,
         },
-        timeout=120,
+        timeout=180,
     )
-    res.raise_for_status()
-    data = res.json()
-    content = data.get("choices", [{}])[0].get("message", {}).get("content")
-    if not content:
-        raise ValueError(f"No content in OpenRouter response: {data}")
-    return extract_json(content)
+
+
+def call_model(system_prompt, user_prompt):
+    last_error = None
+    for attempt, extra in enumerate(ATTEMPTS, start=1):
+        try:
+            res = _post_to_model(system_prompt, user_prompt, extra)
+            if res.status_code >= 400:
+                raise RuntimeError(f"HTTP {res.status_code}: {res.text[:300]}")
+            data = res.json()
+            choice = (data.get("choices") or [{}])[0]
+            content = (choice.get("message") or {}).get("content")
+            if not content:
+                usage = data.get("usage") or {}
+                raise ValueError(
+                    f"empty content (model={data.get('model')}, "
+                    f"finish_reason={choice.get('finish_reason')}, "
+                    f"completion_tokens={usage.get('completion_tokens')})"
+                )
+            return extract_json(content)
+        except (ValueError, RuntimeError, requests.RequestException) as exc:
+            last_error = exc
+            print(f"Attempt {attempt}/{len(ATTEMPTS)} failed: {exc}", file=sys.stderr)
+    raise RuntimeError(
+        f"All {len(ATTEMPTS)} model attempts failed. Last error: {last_error}. "
+        "Try pinning a non-reasoning free model via the OPENROUTER_MODEL repo variable."
+    )
 
 
 SEVERITY_EMOJI = {

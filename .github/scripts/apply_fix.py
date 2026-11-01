@@ -10,6 +10,7 @@ Python 3.10+, `pip install requests`.
 import base64
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -53,10 +54,9 @@ def post_comment(body):
 
 
 def run(cmd):
-    print(f"$ {cmd}")
-    return subprocess.run(
-        cmd, shell=True, check=True, capture_output=True, text=True
-    )
+    # No shell: arguments are split safely, and the token never reaches logs.
+    print("$ " + cmd.replace(GITHUB_TOKEN, "***"))
+    return subprocess.run(shlex.split(cmd), check=True, capture_output=True, text=True)
 
 
 def main():
