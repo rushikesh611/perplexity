@@ -1,3 +1,4 @@
+import "./env";
 import { OpenRouter } from '@openrouter/sdk';
 import express from "express";
 import { PROMPT_TEMPLATE, SYSTEM_PROMPT } from "./prompt";

@@ -241,7 +241,20 @@ export default function Dashboard() {
                 }),
             });
 
-            if (!response.ok || !response.body) throw new Error("Stream connection failed");
+            if (!response.ok) {
+                const errorBody = await response.text();
+                let message = errorBody || `Request failed (${response.status}).`;
+                try {
+                    const parsed = JSON.parse(errorBody);
+                    const summary = parsed.error || parsed.message;
+                    const details = typeof parsed.details === "string" ? parsed.details : "";
+                    message = [summary, details].filter(Boolean).join(": ") || message;
+                } catch {
+                    // Keep the response body as the error message when it is not JSON.
+                }
+                throw new Error(message);
+            }
+            if (!response.body) throw new Error("The server did not start a response stream.");
 
             if (!isFollowUp) {
                 const headerConvId = response.headers.get("x-conversation-id");
