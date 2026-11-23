@@ -1,6 +1,6 @@
 import "./env";
 import { OpenRouter } from '@openrouter/sdk';
-import express from "express";
+import express, { type NextFunction, type Request, type Response as ExpressResponse } from "express";
 import { PROMPT_TEMPLATE, SYSTEM_PROMPT } from "./prompt";
 import { prisma } from './db';
 import { middleware } from './middleware';
@@ -25,14 +25,118 @@ function sourcesBlock(results: { url: string }[]) {
 const app = express();
 const client = tavily({ apiKey: process.env.TAVILY_API_KEY });
 
+class WebSearchError extends Error {}
+
+async function searchWeb(query: string) {
+    try {
+        return await client.search(query, { searchDepth: "advanced" });
+    } catch (error) {
+        console.error("Tavily search request failed:", error);
+        throw new WebSearchError("Web search is temporarily unavailable. Please try again.");
+    }
+}
+
 const openRouterClient = new OpenRouter({
     apiKey: process.env.OPENROUTER_API_KEY
 });
 
 type OpenRouterMessage = {
     role: "system" | "user" | "assistant";
-    content: string;
+    content: string | OpenRouterContentPart[];
 };
+
+type OpenRouterContentPart =
+    | { type: "text"; text: string }
+    | { type: "image_url"; image_url: { url: string } }
+    | { type: "file"; file: { filename: string; file_data: string } };
+
+type RequestAttachment = {
+    name: string;
+    mediaType: string;
+    data: string;
+};
+
+const MAX_ATTACHMENTS = 5;
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+const MAX_TEXT_ATTACHMENT_SIZE = 2 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_SIZE = 15 * 1024 * 1024;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseAttachments(value: unknown): { attachments: RequestAttachment[]; error?: string } {
+    if (value === undefined) return { attachments: [] };
+    if (!Array.isArray(value) || value.length > MAX_ATTACHMENTS) {
+        return { attachments: [], error: `Attach no more than ${MAX_ATTACHMENTS} files.` };
+    }
+
+    const attachments: RequestAttachment[] = [];
+    let totalSize = 0;
+
+    for (const item of value) {
+        if (!isRecord(item) || typeof item.name !== "string" || typeof item.mediaType !== "string" || typeof item.data !== "string") {
+            return { attachments: [], error: "An attachment is invalid." };
+        }
+
+        const { name, mediaType, data } = item;
+        const isImage = ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(mediaType);
+        const isText = mediaType.startsWith("text/") || ["application/json", "application/xml"].includes(mediaType);
+        const isPdf = mediaType === "application/pdf";
+        if (!name.trim() || name.length > 255 || /[\u0000-\u001f]/.test(name) || (!isImage && !isText && !isPdf)) {
+            return { attachments: [], error: `${name || "A file"} has an unsupported type or filename.` };
+        }
+
+        let size: number;
+        if (isText) {
+            size = new TextEncoder().encode(data).byteLength;
+            if (size === 0 || size > MAX_TEXT_ATTACHMENT_SIZE) {
+                return { attachments: [], error: `${name} must be a non-empty text file no larger than 2 MB.` };
+            }
+        } else {
+            const match = /^data:([^;,]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(data);
+            const dataMediaType = match?.[1];
+            const encodedData = match?.[2];
+            if (!dataMediaType || dataMediaType !== mediaType || !encodedData || encodedData.length % 4 !== 0) {
+                return { attachments: [], error: `${name} could not be read as a supported file.` };
+            }
+            const padding = encodedData.endsWith("==") ? 2 : encodedData.endsWith("=") ? 1 : 0;
+            size = encodedData.length * 3 / 4 - padding;
+            if (size === 0 || size > MAX_ATTACHMENT_SIZE) {
+                return { attachments: [], error: `${name} must be no larger than 10 MB.` };
+            }
+        }
+
+        totalSize += size;
+        if (totalSize > MAX_TOTAL_ATTACHMENT_SIZE) {
+            return { attachments: [], error: "Attachments must total 15 MB or less." };
+        }
+        attachments.push({ name, mediaType, data });
+    }
+
+    return { attachments };
+}
+
+function userMessageContent(query: string, attachments: RequestAttachment[]) {
+    if (!attachments.length) return query;
+    return `${query}\n\nAttached files: ${attachments.map(({ name }) => name).join(", ")}`;
+}
+
+function modelUserContent(prompt: string, attachments: RequestAttachment[]): string | OpenRouterContentPart[] {
+    if (!attachments.length) return prompt;
+
+    const content: OpenRouterContentPart[] = [{ type: "text", text: prompt }];
+    for (const attachment of attachments) {
+        if (attachment.mediaType.startsWith("image/")) {
+            content.push({ type: "image_url", image_url: { url: attachment.data } });
+        } else if (attachment.mediaType === "application/pdf") {
+            content.push({ type: "file", file: { filename: attachment.name, file_data: attachment.data } });
+        } else {
+            content.push({ type: "text", text: `Attached file: ${attachment.name}\n${attachment.data}` });
+        }
+    }
+    return content;
+}
 
 async function requestOpenRouterRest(messages: OpenRouterMessage[]) {
     const apiKey = process.env.FUSE_VIRTUAL_KEY;
@@ -41,6 +145,9 @@ async function requestOpenRouterRest(messages: OpenRouterMessage[]) {
     }
 
     return fetch("https://fuse-gateway.rushi611.workers.dev/api/v1/chat/completions", {
+
+
+    // return fetch("http://127.0.0.1:8787/api/v1/chat/completions", {
         method: "POST",
         headers: {
             "Authorization": `Bearer ${apiKey}`,
@@ -100,7 +207,7 @@ async function* streamOpenRouterRest(response: Response) {
     }
 }
 
-app.use(express.json());
+app.use(express.json({ limit: "22mb" }));
 app.use(cors())
 
 app.get("/conversations", middleware, async (req, res) => {
@@ -147,9 +254,7 @@ app.post("/ask", middleware, async (req, res) => {
         return;
     }
 
-    const webSearchResponse = await client.search(query, {
-        searchDepth: "advanced",
-    })
+    const webSearchResponse = await searchWeb(query)
 
     const webSearchResults = webSearchResponse.results;
 
@@ -210,37 +315,44 @@ app.post("/ask", middleware, async (req, res) => {
 });
 
 app.post("/ask-rest", middleware, async (req, res) => {
-    const query = req.body.query;
-    if (typeof query !== "string" || !query.trim()) {
-        res.status(400).json({ error: "Query is required" });
+    const query = typeof req.body.query === "string" ? req.body.query.trim() : "";
+    const parsedAttachments = parseAttachments(req.body.attachments);
+    if (parsedAttachments.error) {
+        res.status(400).json({ error: parsedAttachments.error });
+        return;
+    }
+    const attachments = parsedAttachments.attachments;
+    if (!query && !attachments.length) {
+        res.status(400).json({ error: "A query or attachment is required" });
         return;
     }
 
-    const webSearchResponse = await client.search(query, {
-        searchDepth: "advanced",
-    });
-    const webSearchResults = webSearchResponse.results;
+    const userQuery = query || "Please analyze the attached file(s).";
+    const webSearchResults = query
+        ? (await searchWeb(query)).results
+        : [];
 
     const conversation = await prisma.conversation.create({
         data: {
-            title: query.slice(0, 80),
-            slug: slugify(query),
+            title: userQuery.slice(0, 80),
+            slug: slugify(userQuery),
             userId: req.userId!,
             messages: {
-                create: { content: query, role: "User" }
+                create: { content: userMessageContent(userQuery, attachments), role: "User" }
             }
         }
     });
 
     const userPrompt = PROMPT_TEMPLATE
         .replace("{{WEB_SEARCH_RESULTS}}", JSON.stringify(webSearchResults))
-        .replace("{{USER_QUERY}}", query);
+        .replace("{{USER_QUERY}}", userQuery);
 
     const openRouterResponse = await requestOpenRouterRest([
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userPrompt }
+        { role: "user", content: modelUserContent(userPrompt, attachments) }
     ]);
     console.log("OpenRouter REST response status:", openRouterResponse.status);
+    console.log(openRouterResponse.statusText)
     if (!openRouterResponse.ok) {
         res.status(openRouterResponse.status).json({
             error: "OpenRouter REST request failed",
@@ -290,9 +402,7 @@ app.post("/ask-with-followup", middleware, async (req, res) => {
 
     if (!conversation) { res.status(404).json({ message: "conversation not found" }); return }
 
-    const webSearchResponse = await client.search(query, {
-        searchDepth: "advanced",
-    })
+    const webSearchResponse = await searchWeb(query)
 
     const webSearchResults = webSearchResponse.results;
 
@@ -356,13 +466,20 @@ app.post("/ask-with-followup", middleware, async (req, res) => {
 });
 
 app.post("/ask-with-followup-rest", middleware, async (req, res) => {
-    const query = req.body.query;
+    const query = typeof req.body.query === "string" ? req.body.query.trim() : "";
     const conversationId = req.body.conversationId;
+    const parsedAttachments = parseAttachments(req.body.attachments);
 
-    if (typeof query !== "string" || !query.trim() || typeof conversationId !== "string") {
-        res.status(400).json({ messages: "Missing query or conversationId" });
+    if (parsedAttachments.error) {
+        res.status(400).json({ error: parsedAttachments.error });
         return;
     }
+    const attachments = parsedAttachments.attachments;
+    if ((!query && !attachments.length) || typeof conversationId !== "string") {
+        res.status(400).json({ error: "A query or attachment and conversationId are required" });
+        return;
+    }
+    const userQuery = query || "Please analyze the attached file(s).";
 
     const conversation = await prisma.conversation.findFirst({
         where: { id: conversationId, userId: req.userId },
@@ -374,10 +491,9 @@ app.post("/ask-with-followup-rest", middleware, async (req, res) => {
         return;
     }
 
-    const webSearchResponse = await client.search(query, {
-        searchDepth: "advanced",
-    });
-    const webSearchResults = webSearchResponse.results;
+    const webSearchResults = query
+        ? (await searchWeb(query)).results
+        : [];
 
     const history: OpenRouterMessage[] = conversation.messages.map(message => ({
         role: message.role === "User" ? "user" : "assistant",
@@ -386,11 +502,11 @@ app.post("/ask-with-followup-rest", middleware, async (req, res) => {
 
     const currentPrompt = PROMPT_TEMPLATE
         .replace("{{WEB_SEARCH_RESULTS}}", JSON.stringify(webSearchResults))
-        .replace("{{USER_QUERY}}", query);
+        .replace("{{USER_QUERY}}", userQuery);
 
     const openRouterResponse = await requestOpenRouterRest([
         ...history,
-        { role: "user", content: currentPrompt }
+        { role: "user", content: modelUserContent(currentPrompt, attachments) }
     ]);
     if (!openRouterResponse.ok) {
         res.status(openRouterResponse.status).json({
@@ -402,7 +518,7 @@ app.post("/ask-with-followup-rest", middleware, async (req, res) => {
 
     await prisma.message.create({
         data: {
-            content: query,
+            content: userMessageContent(userQuery, attachments),
             role: "User",
             conversationId: conversation.id
         }
@@ -430,6 +546,14 @@ app.post("/ask-with-followup-rest", middleware, async (req, res) => {
             conversationId: conversation.id
         }
     });
+});
+
+app.use((error: unknown, _req: Request, res: ExpressResponse, next: NextFunction) => {
+    if (error instanceof WebSearchError) {
+        res.status(502).json({ error: error.message });
+        return;
+    }
+    next(error);
 });
 
 app.listen(3001)
