@@ -33,11 +33,9 @@ jobs:
       - name: Run review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          FUSE_VIRTUAL_KEY: ${{ secrets.FUSE_VIRTUAL_KEY }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          # Override in repo/org variables if you want a specific free model
-          # instead of OpenRouter's auto-router, e.g. "qwen/qwen3-coder:free"
           OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL || 'openrouter/free' }}
         run: python .github/scripts/review.py
 

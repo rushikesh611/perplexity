@@ -1,7 +1,7 @@
-"""PR Review Agent — gathers PR context, asks a free OpenRouter model for a
+"""PR Review Agent — gathers PR context, asks a free Fuse model for a
 structured review, and posts/updates a single comment on the PR.
 
-Requires: GITHUB_TOKEN, OPENROUTER_API_KEY, REPO ("owner/repo"), PR_NUMBER
+Requires: GITHUB_TOKEN, FUSE_VIRTUAL_KEY, REPO ("owner/repo"), PR_NUMBER
 Python 3.10+, `pip install requests`.
 """
 
@@ -14,12 +14,12 @@ import sys
 import requests
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+FUSE_VIRTUAL_KEY = os.environ.get("FUSE_VIRTUAL_KEY")
 REPO = os.environ.get("REPO")
 PR_NUMBER = os.environ.get("PR_NUMBER")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openrouter/free")
 
-if not all([GITHUB_TOKEN, OPENROUTER_API_KEY, REPO, PR_NUMBER]):
+if not all([GITHUB_TOKEN, FUSE_VIRTUAL_KEY, REPO, PR_NUMBER]):
     print("Missing required environment variables.", file=sys.stderr)
     sys.exit(1)
 
@@ -109,12 +109,10 @@ ATTEMPTS = [
 
 def _post_to_model(system_prompt, user_prompt, extra):
     return requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
+        "https://fuse-gateway.rushi611.workers.dev/api/v1/chat/completions",
         headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Authorization": f"Bearer {FUSE_VIRTUAL_KEY}",
             "Content-Type": "application/json",
-            "HTTP-Referer": f"https://github.com/{REPO}",
-            "X-Title": "PR Review Agent",
         },
         json={
             "model": OPENROUTER_MODEL,
@@ -224,7 +222,7 @@ def render_comment(review, model, diff_truncated):
         encoded = base64.b64encode(patch.encode("utf-8")).decode("ascii")
         body += f"<!-- pr-review-agent-patch\n{encoded}\npr-review-agent-patch -->\n"
 
-    body += f"\n---\n*Reviewed by `{model}` via OpenRouter. This is an automated review — use judgment.*"
+    body += f"\n---\n*Reviewed by `{model}` via Fuse. This is an automated review — use judgment.*"
     return body
 
 

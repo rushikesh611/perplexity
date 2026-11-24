@@ -24,7 +24,7 @@ needed.
 ├── workflows/
 │   └── pr-review-agent.yml      # triggers: PR open/sync, and /apply-fix comments
 ├── scripts/
-│   ├── review.py                # calls OpenRouter, posts the review comment
+│   ├── review.py                # calls Fuse, posts the review comment
 │   └── apply_fix.py             # applies the approved patch on request
 └── PR_REVIEW_AGENT_SETUP.md     # this file
 ```
@@ -38,30 +38,24 @@ feel free to add one if you'd rather pin the `requests` version.
 Copy the `.github/agents/`, `.github/workflows/pr-review-agent.yml`, and
 `.github/scripts/` paths into your repo as-is.
 
-## 1. Get a free OpenRouter API key
+## 1. Get a Fuse virtual key
 
-1. Sign up at [openrouter.ai](https://openrouter.ai) (no card needed for
-   free models).
-2. Create an API key under **Settings → Keys**.
-3. By default the workflow uses `openrouter/free` — OpenRouter's own router
-   that picks a free model per-request and supports structured JSON output.
-   No model name to keep up to date yourself.
-   - To pin a specific free model instead, set a repo variable
+1. Create a virtual key for the Fuse gateway.
+2. The workflow sends chat completions to
+   `https://fuse-gateway.rushi611.workers.dev/api/v1` using that key.
+3. By default, the workflow requests `openrouter/free`.
+   - To pin a model supported by your Fuse gateway, set a repo variable
      `OPENROUTER_MODEL` (Settings → Secrets and variables → Actions →
      Variables) to something like `qwen/qwen3-coder:free` — check
-     [openrouter.ai/models?max_price=0](https://openrouter.ai/models?max_price=0)
-     for the current free list, since it rotates.
-   - Free-tier limits are roughly 20 requests/minute and 50–1,000
-     requests/day depending on account history — plenty for PR review on a
-     normal repo, but worth knowing if you have a very high PR volume.
+     with your gateway provider for its available model IDs.
 
 ## 2. Add the secret
 
 In your repo: **Settings → Secrets and variables → Actions → New repository
 secret**
 
-- Name: `OPENROUTER_API_KEY`
-- Value: the key from step 1
+- Name: `FUSE_VIRTUAL_KEY`
+- Value: the Fuse virtual key from step 1
 
 `GITHUB_TOKEN` is provided automatically by Actions — nothing to set up
 there, just make sure workflow permissions allow it to comment and push (see
@@ -106,7 +100,7 @@ code. Common tweaks:
 
 ## Limitations to know about
 
-- Free models are smaller than frontier models — treat findings as a strong
+- Free models may be smaller than frontier models — treat findings as a strong
   first pass, not a replacement for human review, especially on
   security-critical changes.
 - The diff and file contents sent to the model are capped (60k chars for
