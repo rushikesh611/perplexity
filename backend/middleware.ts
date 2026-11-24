@@ -12,20 +12,18 @@ export async function middleware(req: Request, res: Response, next: NextFunction
     if (userId) {
         req.userId = userId;
 
-        try {
-            await prisma.user.create({
-                data: {
-                    provider: data.data.user?.app_metadata.provider === "google" ? "Google" : "Github",
-                    email: data.data.user?.email!,
-                    name: data.data.user?.user_metadata.full_name,
-                    supabaseId: data.data.user!.id,
-                    id: data.data.user!.id
-                }
-            })
-
-        } catch (e) {
-            console.log("Error", e)
-        }
+        const user = data.data.user!;
+        const userData = {
+            provider: user.app_metadata.provider === "google" ? "Google" as const : "Github" as const,
+            email: user.email!,
+            name: user.user_metadata.full_name || user.email!,
+            supabaseId: user.id
+        };
+        await prisma.user.upsert({
+            where: { id: userId },
+            create: { ...userData, id: userId },
+            update: userData
+        });
 
         next();
     } else {

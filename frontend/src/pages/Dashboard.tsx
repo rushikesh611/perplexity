@@ -4,7 +4,7 @@ import type { User } from "@supabase/supabase-js";
 import axios from "axios";
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router";
-import { Search, Plus, LogOut, MessageSquare, Compass, Globe, Sparkles, Loader2, Menu, X, User as UserIcon } from "lucide-react";
+import { Search, Plus, LogOut, MessageSquare, Compass, Globe, Sparkles, Loader2, Menu, X, User as UserIcon, Paperclip } from "lucide-react";
 
 const supabase = createClient();
 
@@ -18,6 +18,40 @@ interface Message {
     id?: string;
     role: "User" | "Assistant";
     content: string;
+    attachments?: string[];
+}
+
+interface UploadedAttachment {
+    name: string;
+    mediaType: string;
+    data: string;
+}
+
+const MAX_ATTACHMENTS = 5;
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+const MAX_TEXT_ATTACHMENT_SIZE = 2 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_SIZE = 15 * 1024 * 1024;
+
+function getAttachmentMediaType(file: File) {
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    const inferredTypes: Record<string, string> = {
+        csv: "text/csv",
+        json: "application/json",
+        md: "text/markdown",
+        pdf: "application/pdf",
+        txt: "text/plain",
+    };
+    const mediaType = file.type || inferredTypes[extension ?? ""] || "";
+    if (
+        mediaType.startsWith("text/") ||
+        mediaType === "application/json" ||
+        mediaType === "application/xml" ||
+        mediaType === "application/pdf" ||
+        ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(mediaType)
+    ) {
+        return mediaType;
+    }
+    return null;
 }
 
 export default function Dashboard() {
@@ -29,8 +63,12 @@ export default function Dashboard() {
     const [inputQuery, setInputQuery] = useState("");
     const [isStreaming, setIsStreaming] = useState(false);
     const [isSidebarOpen, setIsSidebarOpen] = useState(false); // Mobile sidebar toggle state
+    const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+    const [attachmentError, setAttachmentError] = useState<string | null>(null);
+    const [requestError, setRequestError] = useState<string | null>(null);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
 
     // Auto-scroll chat to bottom
     useEffect(() => {
@@ -40,11 +78,20 @@ export default function Dashboard() {
     // Auth Guard
     useEffect(() => {
         async function getUser() {
-            const { data } = await supabase.auth.getUser();
-            if (data.user) {
-                setUser(data.user);
-            } else {
-                navigate("/auth");
+            try {
+                const { data, error } = await supabase.auth.getUser();
+                if (error) throw error;
+                if (data.user) {
+                    setUser(data.user);
+                } else {
+                    navigate("/auth");
+                }
+            } catch (error) {
+                console.error("Authentication check failed:", error);
+                navigate("/auth", {
+                    state: { authError: "Unable to verify your sign-in. Check your connection and try again." },
+                    replace: true,
+                });
             }
         }
         getUser();
@@ -88,11 +135,13 @@ export default function Dashboard() {
 
     function handleSearchSubmit(e: React.FormEvent) {
         e.preventDefault();
-        if (!inputQuery.trim()) return;
+        if (!inputQuery.trim() && selectedFiles.length === 0) return;
 
         const targetQuery = inputQuery;
+        const targetFiles = selectedFiles;
         setInputQuery(""); // Instantly clear input for better UX
-        executeSearchPipeline(targetQuery);
+        setAttachmentError(null);
+        executeSearchPipeline(targetQuery, targetFiles);
     }
 
     function startNewChat() {
@@ -100,7 +149,85 @@ export default function Dashboard() {
         setActiveConversationId(null);
         setMessages([]);
         setInputQuery("");
+        setSelectedFiles([]);
+        setAttachmentError(null);
+        setRequestError(null);
         setIsSidebarOpen(false); // Close overlay drawer menu container on action execution
+    }
+
+    function handleAttachmentSelection(event: React.ChangeEvent<HTMLInputElement>) {
+        const files = Array.from(event.target.files ?? []);
+        event.target.value = "";
+        if (!files.length) return;
+
+        const nextFiles = [...selectedFiles];
+        for (const file of files) {
+            const mediaType = getAttachmentMediaType(file);
+            if (!mediaType) {
+                setAttachmentError(`${file.name} is not a supported file type.`);
+                return;
+            }
+            const sizeLimit = mediaType.startsWith("text/") || mediaType === "application/json" || mediaType === "application/xml"
+                ? MAX_TEXT_ATTACHMENT_SIZE
+                : MAX_ATTACHMENT_SIZE;
+            if (file.size === 0 || file.size > sizeLimit) {
+                setAttachmentError(`${file.name} exceeds the ${sizeLimit / (1024 * 1024)} MB limit or is empty.`);
+                return;
+            }
+            if (nextFiles.some((selected) => selected.name === file.name && selected.size === file.size && selected.lastModified === file.lastModified)) {
+                continue;
+            }
+            if (nextFiles.length >= MAX_ATTACHMENTS) {
+                setAttachmentError(`You can attach up to ${MAX_ATTACHMENTS} files.`);
+                return;
+            }
+            if (nextFiles.reduce((total, selected) => total + selected.size, 0) + file.size > MAX_TOTAL_ATTACHMENT_SIZE) {
+                setAttachmentError("Attachments must total 15 MB or less.");
+                return;
+            }
+            nextFiles.push(file);
+        }
+
+        setSelectedFiles(nextFiles);
+        setAttachmentError(null);
+        setRequestError(null);
+    }
+
+    function renderAttachmentControls() {
+        return (
+            <>
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/*,application/json,application/xml"
+                    onChange={handleAttachmentSelection}
+                    disabled={isStreaming}
+                    className="hidden"
+                />
+                {selectedFiles.length > 0 && (
+                    <div className="flex flex-wrap gap-2 px-1 pb-2">
+                        {selectedFiles.map((file) => (
+                            <span key={`${file.name}-${file.lastModified}`} className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-xs text-zinc-300">
+                                <Paperclip className="h-3 w-3 text-teal-400" />
+                                <span className="max-w-40 truncate">{file.name}</span>
+                                <button
+                                    type="button"
+                                    aria-label={`Remove ${file.name}`}
+                                    disabled={isStreaming}
+                                    onClick={() => setSelectedFiles((current) => current.filter((selected) => selected !== file))}
+                                    className="text-zinc-500 hover:text-zinc-200"
+                                >
+                                    <X className="h-3 w-3" />
+                                </button>
+                            </span>
+                        ))}
+                    </div>
+                )}
+                {attachmentError && <p role="alert" className="px-1 pb-2 text-xs text-red-400">{attachmentError}</p>}
+                {requestError && <p role="alert" className="px-1 pb-2 text-xs text-red-400">{requestError}</p>}
+            </>
+        );
     }
 
     // Utility to split the AI stream content away from raw injected JSON tags
@@ -217,17 +344,36 @@ export default function Dashboard() {
     }
 
     // Abstracted execution function for handling text queries
-    async function executeSearchPipeline(queryText: string) {
-        if (!queryText.trim() || isStreaming) return;
+    async function executeSearchPipeline(queryText: string, files: File[] = []) {
+        if ((!queryText.trim() && files.length === 0) || isStreaming) return;
 
         setIsStreaming(true);
+        setRequestError(null);
         const isFollowUp = !!activeConversationId;
         const endpoint = isFollowUp ? `${BACKEND_URL}/ask-with-followup-rest` : `${BACKEND_URL}/ask-rest`;
 
-        setMessages((prev) => [...prev, { role: "User", content: queryText }]);
-        setMessages((prev) => [...prev, { role: "Assistant", content: "" }]);
-
         try {
+            const attachments: UploadedAttachment[] = await Promise.all(files.map(async (file) => {
+                const mediaType = getAttachmentMediaType(file);
+                if (!mediaType) throw new Error(`${file.name} is not a supported file type.`);
+                const isText = mediaType.startsWith("text/") || mediaType === "application/json" || mediaType === "application/xml";
+                const data = isText
+                    ? await file.text()
+                    : await new Promise<string>((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error(`Could not read ${file.name}.`));
+                        reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
+                        reader.readAsDataURL(file);
+                    });
+                return { name: file.name, mediaType, data };
+            }));
+            const displayQuery = queryText.trim() || "Please analyze the attached file(s).";
+            setMessages((prev) => [...prev, {
+                role: "User",
+                content: displayQuery,
+                attachments: files.map((file) => file.name),
+            }, { role: "Assistant", content: "" }]);
+
             const { data: { session } } = await supabase.auth.getSession();
             const response = await fetch(endpoint, {
                 method: "POST",
@@ -238,10 +384,25 @@ export default function Dashboard() {
                 body: JSON.stringify({
                     query: queryText,
                     conversationId: activeConversationId || undefined,
+                    attachments,
                 }),
             });
 
-            if (!response.ok || !response.body) throw new Error("Stream connection failed");
+            if (!response.ok) {
+                const errorBody = await response.text();
+                let message = errorBody || `Request failed (${response.status}).`;
+                try {
+                    const parsed = JSON.parse(errorBody);
+                    const summary = parsed.error || parsed.message;
+                    const details = typeof parsed.details === "string" ? parsed.details : "";
+                    message = [summary, details].filter(Boolean).join(": ") || message;
+                } catch {
+                    // Keep the response body as the error message when it is not JSON.
+                }
+                throw new Error(message);
+            }
+            if (!response.body) throw new Error("The server did not start a response stream.");
+            setSelectedFiles([]);
 
             if (!isFollowUp) {
                 const headerConvId = response.headers.get("x-conversation-id");
@@ -275,6 +436,11 @@ export default function Dashboard() {
 
         } catch (error) {
             console.error("Pipeline failure:", error);
+            setRequestError(error instanceof Error ? error.message : "The request failed.");
+            setMessages((prev) => {
+                const lastMessage = prev[prev.length - 1];
+                return lastMessage?.role === "Assistant" && !lastMessage.content ? prev.slice(0, -1) : prev;
+            });
         } finally {
             setIsStreaming(false);
         }
@@ -425,18 +591,29 @@ export default function Dashboard() {
                                 rows={3}
                                 className="w-full bg-transparent outline-none resize-none text-zinc-200 placeholder-zinc-500 text-sm px-2 pt-1"
                             />
+                            {renderAttachmentControls()}
                             <div className="flex items-center justify-between border-t border-zinc-800/80 pt-2 px-1">
                                 <div className="flex items-center gap-1.5 text-[11px] md:text-xs text-zinc-500 bg-zinc-950 px-2 py-1 rounded-md border border-zinc-800/60">
                                     <Compass className="w-3.5 h-3.5 text-zinc-400" />
                                     <span>Pro Search Depth Enabled</span>
                                 </div>
+                                <div><button
+                                    type="button"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    aria-label="Attach files"
+                                    title="Attach images, PDFs, or text files"
+                                    disabled={isStreaming}
+                                    className="p-2 text-zinc-400 hover:text-zinc-200 rounded-lg transition"
+                                >
+                                    <Paperclip className="w-4 h-4" />
+                                </button>
                                 <button
                                     type="submit"
-                                    disabled={!inputQuery.trim()}
+                                    disabled={!inputQuery.trim() && selectedFiles.length === 0}
                                     className="p-2 bg-zinc-100 hover:bg-zinc-200 disabled:bg-zinc-800 text-zinc-950 disabled:text-zinc-600 rounded-lg transition"
                                 >
                                     <Search className="w-4 h-4" />
-                                </button>
+                                </button></div>
                             </div>
                         </form>
                     </div>
@@ -469,7 +646,18 @@ export default function Dashboard() {
                                         : "w-full text-zinc-300 bg-transparent px-0 py-1"
                                         }`}>
                                         {msg.role === "User" ? (
-                                            <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                                            <>
+                                                <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                                                {msg.attachments && msg.attachments.length > 0 && (
+                                                    <div className="mt-2 flex flex-wrap gap-1.5">
+                                                        {msg.attachments.map((name) => (
+                                                            <span key={name} className="flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-xs text-zinc-400">
+                                                                <Paperclip className="h-3 w-3" />{name}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </>
                                         ) : (
                                             renderMessageContent(msg.content)
                                         )}
@@ -492,7 +680,9 @@ export default function Dashboard() {
 
                         {/* Bottom Dynamic Sticky Context Input Field */}
                         <div className="border-t border-zinc-900/80 bg-zinc-950 px-4 py-3 md:py-4 max-w-3xl mx-auto w-full">
-                            <form onSubmit={handleSearchSubmit} className="flex gap-2 items-center bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 focus-within:border-zinc-700 transition">
+                            <form onSubmit={handleSearchSubmit} className="bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 focus-within:border-zinc-700 transition">
+                                {renderAttachmentControls()}
+                                <div className="flex gap-2 items-center">
                                 <input
                                     type="text"
                                     value={inputQuery}
@@ -502,12 +692,23 @@ export default function Dashboard() {
                                     className="flex-1 bg-transparent text-sm outline-none text-zinc-200 placeholder-zinc-500 disabled:opacity-50 min-w-0"
                                 />
                                 <button
+                                    type="button"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    aria-label="Attach files"
+                                    title="Attach images, PDFs, or text files"
+                                    disabled={isStreaming}
+                                    className="p-1.5 text-zinc-400 hover:text-zinc-200 disabled:opacity-50 rounded-md transition shrink-0"
+                                >
+                                    <Paperclip className="w-4 h-4" />
+                                </button>
+                                <button
                                     type="submit"
-                                    disabled={!inputQuery.trim() || isStreaming}
+                                    disabled={(!inputQuery.trim() && selectedFiles.length === 0) || isStreaming}
                                     className="p-1.5 bg-zinc-100 hover:bg-zinc-200 text-zinc-950 disabled:bg-zinc-800 disabled:text-zinc-600 rounded-md transition shrink-0"
                                 >
                                     {isStreaming ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
                                 </button>
+                                </div>
                             </form>
                         </div>
                     </div>

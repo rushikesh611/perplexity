@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "fuse": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Fuse",
+      "options": {
+        "baseURL": "https://fuse-gateway.rushi611.workers.dev/api/v1",
+        "apiKey": "{env:FUSE_VIRTUAL_KEY_OPENCODE}"
+      },
+      "models": {
+        "nvidia/nemotron-3-ultra-550b-a55b:free": { "name": "NVIDIA: Nemotron 3 Ultra (free)" }
+      }
+    }
+  },
+  "model": "fuse/nvidia/nemotron-3-ultra-550b-a55b:free"
+}
